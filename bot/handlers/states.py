@@ -15,6 +15,7 @@ class VocabularyStates(StatesGroup):
 class DialogueStates(StatesGroup):
     choosing_topic = State()
     awaiting_response = State()
+    first_intro = State()
 
 
 class PronunciationStates(StatesGroup):
@@ -23,6 +24,7 @@ class PronunciationStates(StatesGroup):
 
 
 class ListeningStates(StatesGroup):
+    choosing_mode = State()
     listening = State()
     awaiting_answer = State()
 
@@ -37,3 +39,7 @@ class SettingsStates(StatesGroup):
     main = State()
     choosing_level = State()
     setting_goal = State()
+
+
+class OnboardingStates(StatesGroup):
+    awaiting_first_voice = State()

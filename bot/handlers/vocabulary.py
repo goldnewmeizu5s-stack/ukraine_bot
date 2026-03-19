@@ -1,73 +1,241 @@
 import logging
+import random
 from aiogram import Router, F
 from aiogram.types import CallbackQuery, Message
 from aiogram.fsm.context import FSMContext
 from bot.db.models import User
 from bot.db.base import async_session
-from bot.db.repositories import VocabularyRepository, UserRepository, ProgressRepository
+from bot.db.repositories import VocabularyRepository, ProgressRepository
 from bot.handlers.states import VocabularyStates
-from bot.handlers.voice import send_voice_response
+from bot.handlers.voice import send_voice_then_text, send_voice_only
 from bot.keyboards.inline import (
-    vocabulary_menu_keyboard, vocabulary_categories_keyboard,
-    back_to_menu_keyboard, continue_or_stop_keyboard,
+    vocab_main_kb, vocab_categories_kb, vocab_train_kb,
+    vocab_correct_kb, vocab_incorrect_kb, vocab_result_kb, back_to_menu_kb,
 )
-from bot.utils.constants import PROCESSING_THINK
+from bot.utils.constants import (
+    STATUS_PROCESSING, safe, random_correct, random_incorrect, progress_bar,
+)
 
 logger = logging.getLogger(__name__)
 router = Router()
 
 
-@router.callback_query(F.data == "mode:vocabulary")
-async def on_vocabulary_mode(callback: CallbackQuery, state: FSMContext, **kwargs) -> None:
+async def show_vocab_main(message: Message, state: FSMContext, db_user: User) -> None:
     await state.set_state(VocabularyStates.browsing)
-    await callback.message.edit_text(
-        "📚 Словарь\n\nВыберите действие:",
-        reply_markup=vocabulary_menu_keyboard(),
-    )
+    async with async_session() as session:
+        repo = VocabularyRepository(session)
+        total = await repo.get_word_count(db_user.id)
+        due_words = await repo.get_words_for_review(db_user.id, limit=50)
+    due = len(due_words)
+
+    text = f"📚 <b>Словник</b> — {total} слів\n\n"
+    if due > 0:
+        text += f"🎯 На повторення: <b>{due}</b>"
+    else:
+        text += "✅ Все повторено!"
+
+    await message.answer(text, parse_mode="HTML", reply_markup=vocab_main_kb(due))
+
+
+@router.callback_query(F.data == "menu:vocab")
+async def on_vocab_mode(callback: CallbackQuery, state: FSMContext, db_user: User, **kwargs) -> None:
     await callback.answer()
+    await state.set_state(VocabularyStates.browsing)
+    async with async_session() as session:
+        repo = VocabularyRepository(session)
+        total = await repo.get_word_count(db_user.id)
+        due_words = await repo.get_words_for_review(db_user.id, limit=50)
+    due = len(due_words)
+
+    text = f"📚 <b>Словник</b> — {total} слів\n\n"
+    if due > 0:
+        text += f"🎯 На повторення: <b>{due}</b>"
+    else:
+        text += "✅ Все повторено!"
+
+    await callback.message.edit_text(text, parse_mode="HTML", reply_markup=vocab_main_kb(due))
 
 
 @router.callback_query(F.data == "vocab:my_words")
 async def on_my_words(callback: CallbackQuery, db_user: User, **kwargs) -> None:
+    await callback.answer()
     async with async_session() as session:
         repo = VocabularyRepository(session)
         words = await repo.get_user_words(db_user.id, limit=20)
+        total = await repo.get_word_count(db_user.id)
 
     if not words:
         await callback.message.edit_text(
-            "📚 Ваш словарь пуст. Добавьте слова или начните с /start!",
-            reply_markup=vocabulary_menu_keyboard(),
+            "📚 Словник порожній\n\nДодай перші слова:",
+            parse_mode="HTML",
+            reply_markup=vocab_categories_kb(),
         )
-        await callback.answer()
         return
 
-    text = "📚 Ваши последние слова:\n\n"
+    text = f"📋 <b>Мої слова</b> ({total})\n\n"
     for w in words[:20]:
-        level_bar = "🟢" * min(w.comfort_level, 5) + "⚪" * (5 - min(w.comfort_level, 5))
-        text += f"**{w.word_ua}** — {w.word_ru} {level_bar}\n"
+        bar = progress_bar(w.comfort_level, 5)
+        text += f"<b>{safe(w.word_ua)}</b> → {safe(w.word_ru)} {bar}\n"
 
-    text += f"\nВсего слов: {len(words)}"
-    await callback.message.edit_text(text, reply_markup=vocabulary_menu_keyboard(), parse_mode="Markdown")
+    await callback.message.edit_text(text, parse_mode="HTML", reply_markup=vocab_main_kb())
+
+
+@router.callback_query(F.data == "vocab:sets")
+async def on_vocab_sets(callback: CallbackQuery, **kwargs) -> None:
     await callback.answer()
+    await callback.message.edit_text("📦 Набори слів", parse_mode="HTML", reply_markup=vocab_categories_kb())
 
 
-@router.callback_query(F.data == "vocab:add_word")
-async def on_add_word(callback: CallbackQuery, state: FSMContext, **kwargs) -> None:
-    await state.set_state(VocabularyStates.adding_word)
-    await callback.message.edit_text(
-        "➕ Добавление слова\n\n"
-        'Отправьте слово в формате:\n`украинское слово - русский перевод`\n\nНапример: `кохання - любовь`',
-        reply_markup=back_to_menu_keyboard(),
-        parse_mode="Markdown",
+@router.callback_query(F.data.startswith("vocab:set:"))
+async def on_category_selected(callback: CallbackQuery, db_user: User, **kwargs) -> None:
+    await callback.answer()
+    category = callback.data.split(":")[2]
+
+    from scripts.seed_vocabulary import SEED_WORDS
+    cat_words = [w for w in SEED_WORDS if w.get("category") == category]
+    if not cat_words:
+        await callback.message.edit_text("Набір порожній.", parse_mode="HTML", reply_markup=vocab_main_kb())
+        return
+
+    added = 0
+    async with async_session() as session:
+        repo = VocabularyRepository(session)
+        for w in cat_words:
+            existing = await repo.get_user_words(db_user.id, limit=1)
+            word = await repo.add_word(
+                user_id=db_user.id,
+                word_ua=w["ua"],
+                word_ru=w["ru"],
+                transcription=w.get("transcription"),
+                example_ua=w.get("example"),
+                category=w.get("category"),
+            )
+            if word:
+                added += 1
+
+    from bot.keyboards.inline import vocab_main_kb
+    text = f"📦 Додано: <b>{category}</b> — {len(cat_words)} слів\n\nПочнемо тренування?"
+    await callback.message.edit_text(text, parse_mode="HTML", reply_markup=vocab_main_kb())
+
+
+@router.callback_query(F.data.in_({"vocab:srs", "vocab:train", "vocab:quick"}))
+async def on_srs_review(callback: CallbackQuery, state: FSMContext, db_user: User, **kwargs) -> None:
+    await callback.answer()
+    await state.set_state(VocabularyStates.srs_review)
+
+    is_quick = callback.data == "vocab:quick"
+    limit = 5 if is_quick else 10
+
+    async with async_session() as session:
+        repo = VocabularyRepository(session)
+        words = await repo.get_words_for_review(db_user.id, limit=limit)
+        if not words:
+            words = await repo.get_user_words(db_user.id, limit=limit)
+
+    if not words:
+        await callback.message.edit_text(
+            "📚 Словник порожній. Додай слова з наборів!",
+            parse_mode="HTML",
+            reply_markup=vocab_categories_kb(),
+        )
+        return
+
+    random.shuffle(words)
+    word_ids = [w.id for w in words]
+    word_data = {w.id: {"ua": w.word_ua, "ru": w.word_ru, "tr": w.transcription, "ex": w.example_ua, "cat": w.category, "cl": w.comfort_level} for w in words}
+
+    await state.update_data(
+        srs_word_ids=word_ids,
+        srs_word_data=word_data,
+        srs_index=0,
+        srs_correct=0,
+        srs_total=len(word_ids),
     )
+
+    await _send_srs_card(callback.message, state, db_user, edit=True)
+
+
+async def _send_srs_card(message: Message, state: FSMContext, db_user: User, edit: bool = False) -> None:
+    data = await state.get_data()
+    idx = data.get("srs_index", 0)
+    word_ids = data.get("srs_word_ids", [])
+    word_data = data.get("srs_word_data", {})
+    total = data.get("srs_total", 0)
+
+    if idx >= len(word_ids):
+        correct = data.get("srs_correct", 0)
+        text = (
+            f"📚 Готово!\n\n"
+            f"✅ {correct}/{total}\n\n"
+            f"{random_correct() if correct > total // 2 else 'Продовжуй тренуватися!'}"
+        )
+        if edit:
+            await message.edit_text(text, parse_mode="HTML", reply_markup=vocab_result_kb())
+        else:
+            await message.answer(text, parse_mode="HTML", reply_markup=vocab_result_kb())
+        return
+
+    wid = word_ids[idx]
+    w = word_data.get(str(wid), word_data.get(wid, {}))
+    word_ua = w.get("ua", "")
+
+    await send_voice_only(message, word_ua)
+
+    text = f"📚  {idx + 1}/{total}\n\n🔊 <b>{safe(word_ua)}</b>\n\nЯк перекласти?"
+    if edit:
+        await message.edit_text(text, parse_mode="HTML", reply_markup=vocab_train_kb())
+    else:
+        await message.answer(text, parse_mode="HTML", reply_markup=vocab_train_kb())
+
+
+@router.callback_query(F.data == "vocab:hint")
+async def on_vocab_hint(callback: CallbackQuery, state: FSMContext, **kwargs) -> None:
     await callback.answer()
+    data = await state.get_data()
+    idx = data.get("srs_index", 0)
+    word_ids = data.get("srs_word_ids", [])
+    word_data = data.get("srs_word_data", {})
+
+    if idx < len(word_ids):
+        wid = word_ids[idx]
+        w = word_data.get(str(wid), word_data.get(wid, {}))
+        word_ru = w.get("ru", "")
+        cat = w.get("cat", "")
+        first_letter = word_ru[0] if word_ru else "?"
+        hint = f"💡 Перша буква: <b>{safe(first_letter)}...</b>"
+        if cat:
+            hint += f"\nКатегорія: {safe(cat)}"
+        await callback.message.answer(hint, parse_mode="HTML")
+
+
+@router.callback_query(F.data == "vocab:next")
+async def on_vocab_next(callback: CallbackQuery, state: FSMContext, db_user: User, **kwargs) -> None:
+    await callback.answer()
+    data = await state.get_data()
+    idx = data.get("srs_index", 0)
+    await state.update_data(srs_index=idx + 1)
+    await _send_srs_card(callback.message, state, db_user, edit=False)
+
+
+@router.callback_query(F.data == "vocab:listen")
+async def on_vocab_listen(callback: CallbackQuery, state: FSMContext, **kwargs) -> None:
+    await callback.answer()
+    data = await state.get_data()
+    idx = data.get("srs_index", 0)
+    word_ids = data.get("srs_word_ids", [])
+    word_data = data.get("srs_word_data", {})
+    actual_idx = max(0, idx - 1)
+    if actual_idx < len(word_ids):
+        wid = word_ids[actual_idx]
+        w = word_data.get(str(wid), word_data.get(wid, {}))
+        await send_voice_only(callback.message, w.get("ua", ""))
 
 
 async def handle_add_word_input(message: Message, text: str, state: FSMContext, db_user: User) -> None:
     if "-" not in text:
         await message.reply(
-            'Используйте формат: `украинское слово - русский перевод`',
-            parse_mode="Markdown",
+            "Формат: <code>слово - переклад</code>",
+            parse_mode="HTML",
         )
         return
 
@@ -76,7 +244,7 @@ async def handle_add_word_input(message: Message, text: str, state: FSMContext, 
     word_ru = parts[1].strip()
 
     if not word_ua or not word_ru:
-        await message.reply("Оба слова должны быть указаны.")
+        await message.reply("Обидва слова мають бути вказані.", parse_mode="HTML")
         return
 
     async with async_session() as session:
@@ -84,92 +252,58 @@ async def handle_add_word_input(message: Message, text: str, state: FSMContext, 
         await repo.add_word(user_id=db_user.id, word_ua=word_ua, word_ru=word_ru)
 
     await message.reply(
-        f"✅ Слово добавлено!\n\n**{word_ua}** — {word_ru}\n\nОтправьте ещё слово или вернитесь в меню.",
-        reply_markup=back_to_menu_keyboard(),
-        parse_mode="Markdown",
+        f"✅ <b>{safe(word_ua)}</b> → {safe(word_ru)}",
+        parse_mode="HTML",
+        reply_markup=back_to_menu_kb(),
     )
 
 
-@router.callback_query(F.data == "vocab:categories")
-async def on_categories(callback: CallbackQuery, **kwargs) -> None:
-    await callback.message.edit_text(
-        "📋 Тематические наборы:",
-        reply_markup=vocabulary_categories_keyboard(),
-    )
-    await callback.answer()
+async def handle_vocab_answer(message: Message, text: str, state: FSMContext, db_user: User) -> None:
+    data = await state.get_data()
+    idx = data.get("srs_index", 0)
+    word_ids = data.get("srs_word_ids", [])
+    word_data = data.get("srs_word_data", {})
 
-
-@router.callback_query(F.data.startswith("vocabcat:"))
-async def on_category_selected(callback: CallbackQuery, db_user: User, **kwargs) -> None:
-    category = callback.data.split(":")[1]
-    async with async_session() as session:
-        repo = VocabularyRepository(session)
-        words = await repo.get_user_words(db_user.id, category=category, limit=30)
-
-    if not words:
-        await callback.message.edit_text(
-            f"В категории пока нет слов.",
-            reply_markup=vocabulary_menu_keyboard(),
-        )
-        await callback.answer()
+    if idx >= len(word_ids):
         return
 
-    text = f"📋 Категория: {category}\n\n"
-    for w in words:
-        text += f"**{w.word_ua}** [{w.transcription or ''}] — {w.word_ru}\n"
+    wid = word_ids[idx]
+    w = word_data.get(str(wid), word_data.get(wid, {}))
+    word_ua = w.get("ua", "")
+    word_ru = w.get("ru", "")
+    example = w.get("ex", "")
+    cl = w.get("cl", 0)
 
-    await callback.message.edit_text(text, reply_markup=vocabulary_menu_keyboard(), parse_mode="Markdown")
-    await callback.answer()
+    user_answer = text.strip().lower()
+    correct_answer = word_ru.strip().lower()
+    is_correct = user_answer == correct_answer or user_answer in correct_answer.split("/")
 
-
-@router.callback_query(F.data == "vocab:train")
-async def on_train(callback: CallbackQuery, state: FSMContext, db_user: User, **kwargs) -> None:
-    await state.set_state(VocabularyStates.training)
     async with async_session() as session:
         repo = VocabularyRepository(session)
-        words = await repo.get_user_words(db_user.id, limit=100)
+        await repo.update_word_progress(wid, is_correct)
+        progress_repo = ProgressRepository(session)
+        await progress_repo.increment_words_reviewed(db_user.id)
 
-    if not words:
-        await callback.message.edit_text(
-            "Словарь пуст! Начните с /start для загрузки базовых слов.",
-            reply_markup=vocabulary_menu_keyboard(),
+    if is_correct:
+        new_cl = min(cl + 1, 5)
+        bar = progress_bar(new_cl, 5)
+        response = (
+            f"✅  <b>{safe(word_ua)}</b> → {safe(word_ru)}\n\n"
         )
-        await callback.answer()
-        return
-
-    import random
-    word = random.choice(words)
-    await state.update_data(training_word_id=word.id, training_word_ua=word.word_ua, training_word_ru=word.word_ru)
-
-    await send_voice_response(
-        callback.message,
-        f"🎯 Переведите на русский:\n\n🇺🇦 **{word.word_ua}**",
-        ua_text_for_tts=word.word_ua,
-    )
-    await callback.answer()
-
-
-@router.callback_query(F.data == "vocab:srs")
-async def on_srs_review(callback: CallbackQuery, state: FSMContext, db_user: User, **kwargs) -> None:
-    await state.set_state(VocabularyStates.srs_review)
-    async with async_session() as session:
-        repo = VocabularyRepository(session)
-        words = await repo.get_words_for_review(db_user.id, limit=1)
-
-    if not words:
-        await callback.message.edit_text(
-            "🎉 Нет слов для повторения! Все слова повторены.",
-            reply_markup=vocabulary_menu_keyboard(),
+        if example:
+            response += f"📝 {safe(example)}\n"
+        response += f"{bar}"
+        correct_count = data.get("srs_correct", 0) + 1
+        await state.update_data(srs_correct=correct_count)
+        await message.answer(response, parse_mode="HTML", reply_markup=vocab_correct_kb())
+    else:
+        new_cl = max(0, cl - 2)
+        bar = progress_bar(new_cl, 5)
+        response = (
+            f"❌  <b>{safe(word_ua)}</b> → {safe(word_ru)}\n\n"
+            f"Ти: <i>{safe(text)}</i>\n"
         )
-        await callback.answer()
-        return
-
-    word = words[0]
-    await state.update_data(srs_word_id=word.id, srs_word_ua=word.word_ua, srs_word_ru=word.word_ru)
-
-    await send_voice_response(
-        callback.message,
-        f"🔄 Повторение (SRS)\n\nПереведите на русский:\n\n🇺🇦 **{word.word_ua}**",
-        ua_text_for_tts=word.word_ua,
-    )
-    await callback.answer()
+        if example:
+            response += f"\n📝 {safe(example)}"
+        response += f"\n{bar}"
+        await message.answer(response, parse_mode="HTML", reply_markup=vocab_incorrect_kb())

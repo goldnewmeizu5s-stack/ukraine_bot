@@ -97,3 +97,84 @@ def test_seed_words_categories():
     categories = {w["category"] for w in SEED_WORDS}
     expected = {"greetings", "food", "transport", "numbers", "days_months", "phrases"}
     assert expected.issubset(categories)
+
+
+def test_safe_html_escape():
+    from bot.utils.constants import safe
+    assert safe("<b>test</b>") == "&lt;b&gt;test&lt;/b&gt;"
+    assert safe("normal text") == "normal text"
+    assert safe("a & b") == "a &amp; b"
+
+
+def test_progress_bar():
+    from bot.utils.constants import progress_bar
+    assert progress_bar(0, 10) == "░░░░░░░░"
+    assert progress_bar(10, 10) == "▓▓▓▓▓▓▓▓"
+    assert progress_bar(5, 10) == "▓▓▓▓░░░░"
+    assert progress_bar(0, 0) == "░░░░░░░░"
+
+
+def test_split_message():
+    from bot.utils.constants import split_message
+    short = "Hello world"
+    assert split_message(short) == [short]
+
+    long = ("paragraph one\n\n" * 100).strip()
+    parts = split_message(long, max_len=200)
+    assert len(parts) > 1
+    for part in parts:
+        assert len(part) <= 200 or "\n\n" not in part
+
+
+def test_random_correct_no_repeat():
+    from bot.utils.constants import random_correct
+    results = [random_correct() for _ in range(20)]
+    for i in range(1, len(results)):
+        assert results[i] != results[i - 1]
+
+
+def test_score_emoji():
+    from bot.utils.constants import score_emoji
+    assert score_emoji(10) == "🏆"
+    assert score_emoji(7) == "👏"
+    assert score_emoji(5) == "👍"
+    assert score_emoji(3) == "💪"
+    assert score_emoji(1) == "🌱"
+
+
+def test_persistent_reply_kb():
+    from bot.keyboards.inline import persistent_reply_kb
+    kb = persistent_reply_kb()
+    assert kb.is_persistent is True
+    assert kb.resize_keyboard is True
+    assert len(kb.keyboard) == 1
+    assert len(kb.keyboard[0]) == 3
+
+
+def test_main_menu_kb_callback_data():
+    from bot.keyboards.inline import main_menu_kb
+    kb = main_menu_kb()
+    callbacks = []
+    for row in kb.inline_keyboard:
+        for btn in row:
+            callbacks.append(btn.callback_data)
+    assert "menu:translate" in callbacks
+    assert "menu:vocab" in callbacks
+    assert "menu:dialogue" in callbacks
+    assert "menu:pronunciation" in callbacks
+    assert "menu:listening" in callbacks
+    assert "menu:grammar" in callbacks
+    assert "menu:progress" in callbacks
+    assert "menu:settings" in callbacks
+
+
+def test_inline_button_text_length():
+    from bot.keyboards.inline import (
+        main_menu_kb, dialogue_topics_kb, grammar_topics_kb,
+        pronunciation_difficulty_kb, vocab_categories_kb,
+    )
+    for kb_func in [main_menu_kb, dialogue_topics_kb, grammar_topics_kb, pronunciation_difficulty_kb, vocab_categories_kb]:
+        kb = kb_func()
+        for row in kb.inline_keyboard:
+            for btn in row:
+                assert len(btn.text) <= 25, f"Button text too long: '{btn.text}' ({len(btn.text)} chars)"
