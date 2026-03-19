@@ -10,8 +10,21 @@ class Base(DeclarativeBase):
     pass
 
 
+def _normalize_database_url(url: str) -> str:
+    """Normalize DATABASE_URL to a valid SQLAlchemy async URL."""
+    if not url:
+        raise ValueError("DATABASE_URL is not set or is empty")
+    # Cloud providers (Heroku, Railway, etc.) often use postgres:// which
+    # SQLAlchemy doesn't accept. Convert to postgresql+asyncpg://.
+    if url.startswith("postgres://"):
+        url = url.replace("postgres://", "postgresql+asyncpg://", 1)
+    elif url.startswith("postgresql://"):
+        url = url.replace("postgresql://", "postgresql+asyncpg://", 1)
+    return url
+
+
 engine = create_async_engine(
-    settings.DATABASE_URL,
+    _normalize_database_url(settings.DATABASE_URL),
     echo=False,
     pool_size=10,
     max_overflow=20,
