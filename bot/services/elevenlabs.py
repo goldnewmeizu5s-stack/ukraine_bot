@@ -35,6 +35,12 @@ async def synthesize_ukrainian(text: str, use_cache: bool = True) -> bytes:
                 },
                 timeout=30.0,
             )
+            if response.status_code != 200:
+                logger.error(
+                    "ElevenLabs API error %d: %s",
+                    response.status_code,
+                    response.text[:500],
+                )
             response.raise_for_status()
             audio_bytes = response.content
 

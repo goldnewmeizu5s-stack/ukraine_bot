@@ -35,6 +35,7 @@ async def handle_translate(message: Message, text: str, state: FSMContext, db_us
         await status_msg.delete()
 
         ua_text = _extract_ua_text(result)
+        await state.update_data(last_ua_text=ua_text or "", last_ru_text=text)
         await send_voice_then_text(
             message,
             result,
@@ -56,6 +57,7 @@ async def handle_translate_onboarding(message: Message, text: str, state: FSMCon
         await status_msg.delete()
 
         ua_text = _extract_ua_text(result)
+        await state.update_data(last_ua_text=ua_text or "", last_ru_text=text)
         await send_voice_then_text(message, result, ua_text_for_tts=ua_text)
 
         await state.clear()

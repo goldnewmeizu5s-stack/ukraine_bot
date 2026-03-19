@@ -22,6 +22,7 @@ router = Router()
 
 async def send_voice_only(message: Message, tts_text: str) -> None:
     if not tts_text or len(tts_text) > 2000:
+        logger.warning("TTS skipped: text empty or too long (%d chars)", len(tts_text) if tts_text else 0)
         return
     ogg_path = None
     try:
@@ -29,7 +30,8 @@ async def send_voice_only(message: Message, tts_text: str) -> None:
         ogg_path = await mp3_to_ogg(mp3_bytes)
         await message.answer_voice(FSInputFile(ogg_path))
     except Exception as e:
-        logger.error("TTS send failed: %s", e)
+        logger.error("TTS send failed: %s", e, exc_info=True)
+        await message.answer("⚠️ Не вдалося озвучити. Спробуйте пізніше.")
     finally:
         if ogg_path:
             cleanup_temp(ogg_path)
@@ -49,7 +51,7 @@ async def send_voice_then_text(
             ogg_path = await mp3_to_ogg(mp3_bytes)
             await message.answer_voice(FSInputFile(ogg_path))
         except Exception as e:
-            logger.error("TTS failed: %s", e)
+            logger.error("TTS failed for text '%s...': %s", tts_text[:50], e, exc_info=True)
         finally:
             if ogg_path:
                 cleanup_temp(ogg_path)
