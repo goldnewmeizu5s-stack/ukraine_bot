@@ -1,0 +1,15 @@
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+dist/
+build/
+.env
+*.ogg
+*.wav
+*.mp3
+.venv/
+venv/
+.idea/
+.vscode/
+*.db
