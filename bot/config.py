@@ -5,8 +5,6 @@ from typing import Optional
 class Settings(BaseSettings):
     TELEGRAM_BOT_TOKEN: str
     OPENAI_API_KEY: str
-    ELEVENLABS_API_KEY: str
-    ELEVENLABS_VOICE_ID: str = "EXAVITQu4vr4xnSDxMaL"
     DATABASE_URL: str
     REDIS_URL: Optional[str] = None
     ADMIN_USER_IDS: str = ""

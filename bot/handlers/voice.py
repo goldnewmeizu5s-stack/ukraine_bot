@@ -7,7 +7,7 @@ from aiogram.fsm.context import FSMContext
 from bot.db.models import User
 from bot.services.whisper import transcribe_voice
 from bot.services.audio import ogg_to_wav, save_temp_ogg, cleanup_temp, mp3_to_ogg
-from bot.services.elevenlabs import synthesize_ukrainian
+from bot.services.tts import synthesize_ukrainian
 from bot.handlers.states import (
     PronunciationStates, ListeningStates, DialogueStates, OnboardingStates,
 )
